@@ -229,6 +229,11 @@ public class RemoteAudioSource: AudioStreamSource {
                 self?.parseResponseHeader(response: urlResponse)
                 task.cancel()
                 completion()
+            case let .stream(.failure(error)):
+                // This request is also the first step of every reconnect (`retryOnError` → `seek`),
+                // so its failure has to go through the retry path like the stream's own failure;
+                // dropping it leaves the source with no request and no pending retry.
+                self?.handleFailedStreamEvent(error: error)
             default:
                 break
             }
