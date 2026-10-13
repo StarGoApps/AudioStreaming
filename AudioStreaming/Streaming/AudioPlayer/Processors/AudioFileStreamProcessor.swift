@@ -587,7 +587,7 @@ final class AudioFileStreamProcessor {
                     fillUsedFrames(framesCount: framesAdded)
                     return
                 } else if status != 0 {
-                    fileStreamCallback?(.raiseError(.codecError))
+                    raiseCodecError(resetting: converter)
                     return
                 }
 
@@ -620,7 +620,7 @@ final class AudioFileStreamProcessor {
                     fillUsedFrames(framesCount: framesAdded)
                     continue packetProcess
                 } else if status != 0 {
-                    fileStreamCallback?(.raiseError(.codecError))
+                    raiseCodecError(resetting: converter)
                     return
                 }
             } else {
@@ -651,11 +651,24 @@ final class AudioFileStreamProcessor {
                     fillUsedFrames(framesCount: framesAdded)
                     continue packetProcess
                 } else if status != 0 {
-                    fileStreamCallback?(.raiseError(.codecError))
+                    raiseCodecError(resetting: converter)
                     return
                 }
             }
         }
+    }
+
+    /// Raises `.codecError` after resetting the converter.
+    ///
+    /// A failed `AudioConverterFillComplexBuffer` can leave the converter holding a span of the
+    /// input it was given, which points into `inInputData` — memory owned by `AudioFileStream` that
+    /// is gone once this packets proc returns. The source keeps delivering data after the error,
+    /// so the next call would have the converter consolidate that stale span with new input and
+    /// read freed memory (`ACSpanningInputBuffer::consolidateInput` → `memmove`, SIGSEGV/SIGBUS).
+    /// Resetting drops the stale span, as `processSeek()` and `createAudioConverter` already do.
+    private func raiseCodecError(resetting converter: AudioConverterRef) {
+        AudioConverterReset(converter)
+        fileStreamCallback?(.raiseError(.codecError))
     }
 
     /// Fills the `AudioBuffer` with data as required
