@@ -679,6 +679,7 @@ open class AudioPlayer {
         audioEngine.reset()
         audioEngine.pause()
         player.auAudioUnit.stopHardware()
+        releaseOutputRenderResources()
         Logger.debug("engine paused ⏸", category: .generic)
     }
 
@@ -688,10 +689,25 @@ open class AudioPlayer {
     private func stopEngine(reason: AudioPlayerStopReason) {
         audioEngine.stop()
         player.auAudioUnit.stopHardware()
+        releaseOutputRenderResources()
         rendererContext.resetBuffers()
         playerContext.setInternalState(to: .stopped)
         playerContext.stopReason.write { $0 = reason }
         Logger.debug("engine stopped 🛑", category: .generic)
+    }
+
+    /// Releases the output unit's render resources while nothing plays (macOS only).
+    ///
+    /// On macOS 12–15 CoreAudio rebuilds the buffers of an idle default-output unit on its own
+    /// device-notification queue when the output device changes or disappears (headphones
+    /// unplugged, AirPods disconnected), and that rebuild crashes inside the `caulk` allocator
+    /// with no app frame on the stack (StarGoApps/radio-tech-docs#1914). A unit without render
+    /// resources has nothing to rebuild. `startPlayer` allocates them again before
+    /// `startHardware`, so every start path is unchanged. iOS keeps its current behaviour.
+    private func releaseOutputRenderResources() {
+        #if os(macOS)
+        player.auAudioUnit.deallocateRenderResources()
+        #endif
     }
 
     /// Starts the audio player, resetting the buffers if requested
