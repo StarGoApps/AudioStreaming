@@ -523,6 +523,7 @@ open class AudioPlayer {
         for node in customAttachedNodes {
             audioEngine.detach(node)
         }
+        customAttachedNodes.removeAll()
         attachAndConnectDefaultNodes()
     }
 

@@ -6,7 +6,7 @@ let package = Package(
     name: "AudioStreaming",
     platforms: [
         .iOS(.v15),
-        .macOS(.v13),
+        .macOS(.v12),
         .tvOS(.v16)
     ],
     products: [
