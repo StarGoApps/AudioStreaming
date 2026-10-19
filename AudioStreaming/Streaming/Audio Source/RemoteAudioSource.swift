@@ -101,7 +101,9 @@ public class RemoteAudioSource: AudioStreamSource {
         let metadataProcessor = MetadataStreamProcessor(parser: metadataParser.eraseToAnyParser())
         let netStatusProvider = NetStatusService(network: NWPathMonitor())
         let icyheaderProcessor = IcycastHeadersProcessor()
-        let retrierTimeout = Retrier(interval: .seconds(1), maxInterval: 5, underlyingQueue: nil)
+        // On the source's own queue, the one `AudioPlayer` calls `seek` and `close` on: the retry
+        // calls `seek` too. With `nil` it ran on a global queue.
+        let retrierTimeout = Retrier(interval: .seconds(1), maxInterval: 5, underlyingQueue: underlyingQueue)
         self.init(networking: networking,
                   metadataStreamSource: metadataProcessor,
                   icycastHeadersProcessor: icyheaderProcessor,
@@ -182,6 +184,8 @@ public class RemoteAudioSource: AudioStreamSource {
             guard let self = self else { return }
             guard connection.isConnected else { return }
             if self.waitingForNetwork {
+                // A network that has just come back is a fresh start, not one more failed attempt.
+                self.retrierTimeout.reset()
                 self.seek(at: self.supportsSeek ? self.position : 0)
                 self.waitingForNetwork = false
             }
@@ -288,6 +292,8 @@ public class RemoteAudioSource: AudioStreamSource {
             delegate?.errorOccurred(source: self, error: NetworkError.missingData)
             return
         }
+        // Audio is arriving: the connection works, so the next failure backs off from the start.
+        retrierTimeout.reset()
         addStreamOperation { [weak self] in
             guard let self = self else { return }
             if self.shouldTryParsingIcycastHeaders {
