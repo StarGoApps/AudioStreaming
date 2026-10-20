@@ -47,6 +47,42 @@ final class RemoteAudioSourceRetryTests: XCTestCase {
         wait(for: [resumed], timeout: 10)
         XCTAssertGreaterThan(server.refusedConnections, 0, "the first reconnect was expected to fail")
     }
+
+    /// A 6.5 s outage. Reconnecting once a second makes six failed attempts; backing off 1, 2, 4 s
+    /// makes two (at about 1 s and 3 s) and the third, at about 7 s, gets through.
+    func test_Source_Backs_Off_During_A_Long_Outage() throws {
+        server.stop()
+        server = try DroppingStreamServer(refuseWindow: 6.5)
+        try server.start()
+        let resumed = expectation(description: "audio after the outage")
+        resumed.assertForOverFulfill = false
+        delegate = SourceDelegateSpy(onData: { data in
+            if data.contains(DroppingStreamServer.laterStreamByte) { resumed.fulfill() }
+        })
+        let queue = DispatchQueue(label: "remote.audio.source.backoff.tests")
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(server.port)/live.mp3"))
+        source = RemoteAudioSource(networking: NetworkingClient(),
+                                   metadataStreamSource: MetadataStreamProcessor(parser: MetadataParser().eraseToAnyParser()),
+                                   icycastHeadersProcessor: IcycastHeadersProcessor(),
+                                   netStatusProvider: ConnectedNetStatusProvider(),
+                                   retrier: Retrier(interval: .seconds(1), maxInterval: 5, underlyingQueue: queue),
+                                   url: url,
+                                   httpMethod: nil,
+                                   httpBody: nil,
+                                   underlyingQueue: queue,
+                                   httpHeaders: [:])
+        source.delegate = delegate
+
+        source.seek(at: 0)
+
+        wait(for: [resumed], timeout: 15)
+        // One reconnect can open more than one connection (URLSession retries a request whose
+        // connection closed before any response), so attempts are counted as bursts of refusals.
+        let attempts = server.refusalBursts(apart: 0.5)
+        XCTAssertGreaterThan(attempts, 0, "the outage was expected to refuse some reconnects")
+        XCTAssertLessThanOrEqual(attempts, 3,
+                                 "\(attempts) reconnects in a 6.5 s outage — the backoff did not grow")
+    }
 }
 
 // MARK: - Helpers
@@ -86,7 +122,16 @@ private final class DroppingStreamServer {
     private var connections: [NWConnection] = []
     private(set) var port: UInt16 = 0
     private var _refusedConnections = 0
+    private var refusedAt: [Date] = []
     var refusedConnections: Int { queue.sync { _refusedConnections } }
+
+    /// Refusals grouped into bursts: refusals closer than `gap` apart belong to one reconnect.
+    func refusalBursts(apart gap: TimeInterval) -> Int {
+        queue.sync {
+            zip(refusedAt.dropFirst(), refusedAt).filter { $0.timeIntervalSince($1) > gap }.count
+                + (refusedAt.isEmpty ? 0 : 1)
+        }
+    }
 
     init(refuseWindow: TimeInterval) throws {
         self.refuseWindow = refuseWindow
@@ -129,6 +174,7 @@ private final class DroppingStreamServer {
     private func respond(to request: String, on connection: NWConnection) {
         if let droppedAt, Date().timeIntervalSince(droppedAt) < refuseWindow {
             _refusedConnections += 1
+            refusedAt.append(Date())
             connection.cancel()
             return
         }
