@@ -7,6 +7,7 @@ import AudioToolbox
 import AVFoundation
 import Foundation
 import Network
+import OSLog
 
 enum RemoteAudioSourceError: Error {
     case mp4NotSeekable
@@ -278,13 +279,29 @@ public class RemoteAudioSource: AudioStreamSource {
         case let .complete(event):
             if let error = event.error {
                 delegate?.errorOccurred(source: self, error: error)
-            } else {
+            } else if hasKnownLength {
                 addCompletionOperation { [weak self] in
                     guard let self = self else { return }
                     self.delegate?.endOfFileOccurred(source: self)
                 }
+            } else {
+                // A response with no known length has no end of file: a live stream's server closed
+                // the connection (a restart, a mount switch). Reconnect, through the same backoff as
+                // a dropped connection, rather than report the end of the file.
+                Logger.debug("stream with no known length closed cleanly; reconnecting", category: .networking)
+                handleDroppedConnection()
             }
         }
+    }
+
+    /// Whether the response gave the resource's full length: a `Content-Length` on a 200, or the
+    /// total of a 206's `Content-Range`. Only then is a clean close the end of the file.
+    ///
+    /// A live stream gives none: no `Content-Length` (a close-delimited or chunked body), a
+    /// `Content-Range` total of `*`, or an ICY response. A clean close of such a response is a
+    /// dropped connection — the body has no end to reach.
+    private var hasKnownLength: Bool {
+        length > 0
     }
 
     private func handleSuccessfulStreamEvent(response: NetworkDataStream.Response) {
@@ -316,6 +333,11 @@ public class RemoteAudioSource: AudioStreamSource {
     }
 
     private func handleFailedStreamEvent(error _: Error) {
+        handleDroppedConnection()
+    }
+
+    /// The connection ended before the stream did: wait for the network, or retry with backoff.
+    private func handleDroppedConnection() {
         if !netStatusService.isConnected {
             waitingForNetwork = true
             return
