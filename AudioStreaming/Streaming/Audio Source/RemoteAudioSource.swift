@@ -30,6 +30,10 @@ public class RemoteAudioSource: AudioStreamSource {
     private let httpBody: Data?
     private let networkingClient: NetworkingClient
     private var streamRequest: NetworkDataStream?
+    /// The header request that starts every open (`initialRequest`). Kept so `close` can cancel it
+    /// and take it out of the networking client's task map, as it does `streamRequest`; it used to
+    /// be cancelled once it answered and never removed (radio-tech-docs#2432).
+    private var initialStreamRequest: NetworkDataStream?
 
     private var additionalRequestHeaders: [String: String]
 
@@ -149,6 +153,11 @@ public class RemoteAudioSource: AudioStreamSource {
             networkingClient.remove(task: streamTask)
         }
         streamRequest = nil
+        if let initialTask = initialStreamRequest {
+            initialTask.cancel()
+            networkingClient.remove(task: initialTask)
+        }
+        initialStreamRequest = nil
     }
 
     public func seek(at offset: Int) {
@@ -182,15 +191,21 @@ public class RemoteAudioSource: AudioStreamSource {
 
     private func startNetworkService() {
         netStatusService.start { [weak self] connection in
-            guard let self = self else { return }
-            guard connection.isConnected else { return }
-            if self.waitingForNetwork {
-                // A network that has just come back is a fresh start, not one more failed attempt.
-                self.retrierTimeout.reset()
-                self.seek(at: self.supportsSeek ? self.position : 0)
-                self.waitingForNetwork = false
+            // `NWPathMonitor` answers on its own queue (`net.path.queue`), and `seek` → `close`
+            // touch `streamRequest` and the task map that the source's queue owns. Hop onto it, as
+            // the `Retrier` does since 7a42d1a (radio-tech-docs#2432).
+            self?.underlyingQueue.async { [weak self] in
+                self?.networkStatusChanged(isConnected: connection.isConnected)
             }
         }
+    }
+
+    private func networkStatusChanged(isConnected: Bool) {
+        guard isConnected, waitingForNetwork else { return }
+        // A network that has just come back is a fresh start, not one more failed attempt.
+        retrierTimeout.reset()
+        seek(at: supportsSeek ? position : 0)
+        waitingForNetwork = false
     }
 
     private func performOpen(seek seekOffset: Int) {
@@ -228,11 +243,17 @@ public class RemoteAudioSource: AudioStreamSource {
     private func initialRequest(completion: @escaping () -> Void) {
         let urlRequest = fetchUrlForPartialContent(with: url)
         let task: NetworkDataStream = networkingClient.stream(request: urlRequest)
+        initialStreamRequest = task
         task.responseStream { [weak self] event in
             switch event {
             case let .response(urlResponse):
-                self?.parseResponseHeader(response: urlResponse)
+                guard let self else { return }
+                self.parseResponseHeader(response: urlResponse)
                 task.cancel()
+                self.networkingClient.remove(task: task)
+                if self.initialStreamRequest == task {
+                    self.initialStreamRequest = nil
+                }
                 completion()
             case let .stream(.failure(error)):
                 // This request is also the first step of every reconnect (`retryOnError` → `seek`),
