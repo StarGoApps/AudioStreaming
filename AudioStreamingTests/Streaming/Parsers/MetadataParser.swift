@@ -70,6 +70,55 @@ class MetadataParserTests: XCTestCase {
         }
     }
 
+    // MARK: - A value ends at its closing quote (radio-tech-docs#1916)
+
+    private func parsed(_ string: String) -> [String: String]? {
+        guard case let .success(values) = MetadataParser().parse(input: string.data(using: .utf8)!) else {
+            return nil
+        }
+        return values
+    }
+
+    /// Every `'` was deleted from every value: «Shakin' Shakin' Shakes» read
+    /// «Shakin Shakin Shakes».
+    func testParserKeepsApostrophesInsideTheValue() throws {
+        let values = parsed("StreamTitle='The Shakin' Shakin' Shakes - Shakin' Shakin' Shakes';\0\0")
+        XCTAssertEqual(values, ["StreamTitle": "The Shakin' Shakin' Shakes - Shakin' Shakin' Shakes"])
+    }
+
+    /// The block was split on every `;`, so the title ended at its own
+    /// semicolon and the tail became a key of its own.
+    func testParserKeepsSemicolonsInsideTheValue() throws {
+        let values = parsed("StreamTitle='Artist - Live; Unplugged';\0\0\0")
+        XCTAssertEqual(values, ["StreamTitle": "Artist - Live; Unplugged"])
+    }
+
+    /// Both at once, followed by a `StreamUrl` whose own query holds a `;`.
+    func testParserSeparatesStreamTitleFromStreamUrl() throws {
+        let values = parsed(
+            "StreamTitle='Guns N' Roses - Sweet Child o' Mine; Live';StreamUrl='https://example.com/cover.jpg?a=1;b=2';\0"
+        )
+        XCTAssertEqual(values, [
+            "StreamTitle": "Guns N' Roses - Sweet Child o' Mine; Live",
+            "StreamUrl": "https://example.com/cover.jpg?a=1;b=2",
+        ])
+    }
+
+    /// An apostrophe right before a `;` closes nothing unless the next `Key=`
+    /// or the end follows; one right before the closing quote stays.
+    func testParserFindsTheClosingQuoteNextToOtherQuotes() throws {
+        XCTAssertEqual(parsed("StreamTitle='Shakin'; Shakes';"), ["StreamTitle": "Shakin'; Shakes"])
+        XCTAssertEqual(parsed("StreamTitle='Rockin'';StreamUrl='';"), ["StreamTitle": "Rockin'", "StreamUrl": ""])
+    }
+
+    /// The shapes around the quoted one: no trailing `;`, an unquoted value,
+    /// an empty unquoted value, and a value whose closing quote never came.
+    func testParserReadsValuesWithoutTheUsualDelimiters() throws {
+        XCTAssertEqual(parsed("StreamTitle='Shakin' Shakes'"), ["StreamTitle": "Shakin' Shakes"])
+        XCTAssertEqual(parsed("StreamTitle=Plain title;StreamUrl=;"), ["StreamTitle": "Plain title", "StreamUrl": ""])
+        XCTAssertEqual(parsed("StreamTitle='Cut off"), ["StreamTitle": "Cut off"])
+    }
+
     func testParserOutputsFailureOnEmptyStringData() throws {
         let data = "".data(using: .utf8)!
         let parser = MetadataParser()
